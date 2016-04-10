@@ -11,7 +11,7 @@ import "github.com/1lann/udp-forward"
 
 func main() {
 	// Forward(src, dst). It's asynchronous.
-	forwarder, err := forward.Forward("0.0.0.0:1000", "1.2.3.4:1023")
+	forwarder, err := forward.Forward("0.0.0.0:1000", "1.2.3.4:1023", forward.DefaultTimeout)
 	if err != nil {
 		panic(err)
 	}
