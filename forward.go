@@ -39,7 +39,8 @@ var DefaultTimeout = time.Minute * 5
 
 // Forward forwards UDP packets from the src address to the dst address, with a
 // timeout to "disconnect" clients after the timeout period of inactivity. It
-// implements a reverse NAT and thus supports multiple seperate users.
+// implements a reverse NAT and thus supports multiple seperate users. Forward
+// is also asynchronous.
 func Forward(src, dst string, timeout time.Duration) (*Forwarder, error) {
 	forwarder := new(Forwarder)
 	forwarder.connectionsMutex = new(sync.RWMutex)
