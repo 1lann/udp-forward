@@ -43,6 +43,8 @@ var DefaultTimeout = time.Minute * 5
 // is also asynchronous.
 func Forward(src, dst string, timeout time.Duration) (*Forwarder, error) {
 	forwarder := new(Forwarder)
+	forwarder.connectCallback = func(addr string) {}
+	forwarder.disconnectCallback = func(addr string) {}
 	forwarder.connectionsMutex = new(sync.RWMutex)
 	forwarder.connections = make(map[string]connection)
 	forwarder.timeout = timeout
