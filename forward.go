@@ -152,8 +152,6 @@ func (f *Forwarder) handle(data []byte, addr *net.UDPAddr) {
 				f.listenerConn.WriteTo(data, addr)
 			}(buf[:n], conn, addr)
 		}
-
-		return
 	}
 
 	conn.udp.WriteTo(data, f.dst)
@@ -180,6 +178,7 @@ func (f *Forwarder) handle(data []byte, addr *net.UDPAddr) {
 	}
 }
 
+// Close stops the forwarder.
 func (f *Forwarder) Close() {
 	f.connectionsMutex.Lock()
 	f.closed = true
@@ -196,7 +195,7 @@ func (f *Forwarder) OnConnect(callback func(addr string)) {
 	f.connectCallback = callback
 }
 
-// OnConnect can be called with a callback function to be called whenever a
+// OnDisconnect can be called with a callback function to be called whenever a
 // new client disconnects (after 5 minutes of inactivity).
 func (f *Forwarder) OnDisconnect(callback func(addr string)) {
 	f.disconnectCallback = callback
@@ -205,8 +204,9 @@ func (f *Forwarder) OnDisconnect(callback func(addr string)) {
 // Connected returns the list of connected clients in IP:port form.
 func (f *Forwarder) Connected() []string {
 	f.connectionsMutex.Lock()
+	defer f.connectionsMutex.Unlock()
 	results := make([]string, 0, len(f.connections))
-	for key, _ := range f.connections {
+	for key := range f.connections {
 		results = append(results, key)
 	}
 	return results
