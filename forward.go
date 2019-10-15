@@ -11,6 +11,7 @@ import (
 const bufferSize = 4096
 
 type connection struct {
+	available  chan struct{}
 	udp        *net.UDPConn
 	lastActive time.Time
 }
@@ -22,7 +23,7 @@ type Forwarder struct {
 	client       *net.UDPAddr
 	listenerConn *net.UDPConn
 
-	connections      map[string]connection
+	connections      map[string]*connection
 	connectionsMutex *sync.RWMutex
 
 	connectCallback    func(addr string)
@@ -35,7 +36,7 @@ type Forwarder struct {
 
 // DefaultTimeout is the default timeout period of inactivity for convenience
 // sake. It is equivelant to 5 minutes.
-var DefaultTimeout = time.Minute * 5
+const DefaultTimeout = time.Minute * 5
 
 // Forward forwards UDP packets from the src address to the dst address, with a
 // timeout to "disconnect" clients after the timeout period of inactivity. It
@@ -46,7 +47,7 @@ func Forward(src, dst string, timeout time.Duration) (*Forwarder, error) {
 	forwarder.connectCallback = func(addr string) {}
 	forwarder.disconnectCallback = func(addr string) {}
 	forwarder.connectionsMutex = new(sync.RWMutex)
-	forwarder.connections = make(map[string]connection)
+	forwarder.connections = make(map[string]*connection)
 	forwarder.timeout = timeout
 
 	var err error
@@ -58,12 +59,6 @@ func Forward(src, dst string, timeout time.Duration) (*Forwarder, error) {
 	forwarder.dst, err = net.ResolveUDPAddr("udp", dst)
 	if err != nil {
 		return nil, err
-	}
-
-	forwarder.client = &net.UDPAddr{
-		IP:   forwarder.src.IP,
-		Port: 0,
-		Zone: forwarder.src.Zone,
 	}
 
 	forwarder.listenerConn, err = net.ListenUDP("udp", forwarder.src)
@@ -80,8 +75,10 @@ func Forward(src, dst string, timeout time.Duration) (*Forwarder, error) {
 func (f *Forwarder) run() {
 	for {
 		buf := make([]byte, bufferSize)
-		n, addr, err := f.listenerConn.ReadFromUDP(buf)
+		oob := make([]byte, bufferSize)
+		n, _, _, addr, err := f.listenerConn.ReadMsgUDP(buf, oob)
 		if err != nil {
+			log.Println("forward: failed to read, terminating:", err)
 			return
 		}
 		go f.handle(buf[:n], addr)
@@ -115,46 +112,78 @@ func (f *Forwarder) janitor() {
 }
 
 func (f *Forwarder) handle(data []byte, addr *net.UDPAddr) {
-	f.connectionsMutex.RLock()
+	f.connectionsMutex.Lock()
 	conn, found := f.connections[addr.String()]
-	f.connectionsMutex.RUnlock()
+	if !found {
+		f.connections[addr.String()] = &connection{
+			available:  make(chan struct{}),
+			udp:        nil,
+			lastActive: time.Now(),
+		}
+	}
+	f.connectionsMutex.Unlock()
 
 	if !found {
-		conn, err := net.ListenUDP("udp", f.client)
+		var udpConn *net.UDPConn
+		var err error
+		if f.dst.IP.To4()[0] == 127 {
+			// log.Println("using local listener")
+			laddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:")
+			udpConn, err = net.DialUDP("udp", laddr, f.dst)
+		} else {
+			udpConn, err = net.DialUDP("udp", nil, f.dst)
+		}
 		if err != nil {
-			log.Println("udp-forwader: failed to dial:", err)
+			log.Println("udp-forward: failed to dial:", err)
+			delete(f.connections, addr.String())
 			return
 		}
 
 		f.connectionsMutex.Lock()
-		f.connections[addr.String()] = connection{
-			udp:        conn,
-			lastActive: time.Now(),
-		}
+		f.connections[addr.String()].udp = udpConn
+		f.connections[addr.String()].lastActive = time.Now()
+		close(f.connections[addr.String()].available)
 		f.connectionsMutex.Unlock()
 
 		f.connectCallback(addr.String())
 
-		conn.WriteTo(data, f.dst)
+		_, _, err = udpConn.WriteMsgUDP(data, nil, nil)
+		if err != nil {
+			log.Println("udp-forward: error sending initial packet to client", err)
+		}
 
 		for {
+			// log.Println("in loop to read from NAT connection to servers")
 			buf := make([]byte, bufferSize)
-			n, _, err := conn.ReadFromUDP(buf)
+			oob := make([]byte, bufferSize)
+			n, _, _, _, err := udpConn.ReadMsgUDP(buf, oob)
 			if err != nil {
 				f.connectionsMutex.Lock()
-				conn.Close()
+				udpConn.Close()
 				delete(f.connections, addr.String())
 				f.connectionsMutex.Unlock()
+				f.disconnectCallback(addr.String())
+				log.Println("udp-forward: abnormal read, closing:", err)
 				return
 			}
 
-			go func(data []byte, conn *net.UDPConn, addr *net.UDPAddr) {
-				f.listenerConn.WriteTo(data, addr)
-			}(buf[:n], conn, addr)
+			// log.Println("sent packet to client")
+			_, _, err = f.listenerConn.WriteMsgUDP(buf[:n], nil, addr)
+			if err != nil {
+				log.Println("udp-forward: error sending packet to client:", err)
+			}
 		}
+
+		// unreachable
 	}
 
-	conn.udp.WriteTo(data, f.dst)
+	<-conn.available
+
+	// log.Println("sent packet to server", conn.udp.RemoteAddr())
+	_, _, err := conn.udp.WriteMsgUDP(data, nil, nil)
+	if err != nil {
+		log.Println("udp-forward: error sending packet to server:", err)
+	}
 
 	shouldChangeTime := false
 	f.connectionsMutex.RLock()
